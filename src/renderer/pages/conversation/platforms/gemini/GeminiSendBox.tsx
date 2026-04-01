@@ -296,7 +296,11 @@ const GeminiSendBox: React.FC<{
     conversationId: conversation_id,
     isBusy,
     isHydrated: hasHydratedRunningState,
-    onExecute: executeCommand,
+    onStarted: (item) => {
+      setWaitingResponse(true);
+      void checkAndUpdateTitle(conversation_id, item.input);
+      emitter.emit('chat.history.refresh');
+    },
   });
 
   const onSendHandler = async (message: string) => {
