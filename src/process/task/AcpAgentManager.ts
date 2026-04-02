@@ -74,6 +74,14 @@ type BufferedStreamTextMessage = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+type AcpTurnLifecycleState =
+  | 'idle'
+  | 'starting'
+  | 'waiting_first_token'
+  | 'streaming'
+  | 'awaiting_permission'
+  | 'error';
+
 class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissionOption> {
   workspace: string;
   agent: AcpAgent;
@@ -97,6 +105,7 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
   private acpAvailableSlashWaiters: Array<(commands: SlashCommandItem[]) => void> = [];
   private readonly streamDbFlushIntervalMs = 120;
   private readonly bufferedStreamTextMessages = new Map<string, BufferedStreamTextMessage>();
+  private turnLifecycleState: AcpTurnLifecycleState = 'idle';
 
   constructor(data: AcpAgentManagerData) {
     super('acp', data, new IpcAgentEventEmitter());
@@ -105,9 +114,14 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
     this.options = data;
     this.currentMode = data.sessionMode || 'default';
     this.persistedModelId = data.currentModelId || null;
-    this.status = 'pending';
+    this.setTurnLifecycleState('idle');
     // Sync yoloMode from sessionMode so addConfirmation auto-approves when Full Auto is selected
     this.yoloMode = this.yoloMode || this.isYoloMode(this.currentMode);
+  }
+
+  private setTurnLifecycleState(state: AcpTurnLifecycleState): void {
+    this.turnLifecycleState = state;
+    this.status = state === 'idle' || state === 'error' ? 'finished' : 'running';
   }
 
   private makeStreamBufferKey(message: Extract<TMessage, { type: 'text' }>): string {
@@ -361,11 +375,21 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
             return; // Don't process further / 不需要继续处理
           }
 
-          // Mark as finished when content is output (visible to user)
-          // ACP uses: content, agent_status, acp_tool_call, plan
-          const contentTypes = ['content', 'agent_status', 'acp_tool_call', 'plan'];
-          if (contentTypes.includes(message.type)) {
-            this.status = 'finished';
+          if (message.type === 'start') {
+            this.setTurnLifecycleState('waiting_first_token');
+          }
+
+          if (message.type === 'content' || message.type === 'acp_tool_call' || message.type === 'plan') {
+            this.setTurnLifecycleState('streaming');
+          }
+
+          if (message.type === 'agent_status') {
+            const agentStatus = (message.data as { status?: string } | null)?.status;
+            if (agentStatus === 'error' || agentStatus === 'disconnected') {
+              this.setTurnLifecycleState('error');
+            } else if (this.turnLifecycleState !== 'idle' && this.turnLifecycleState !== 'awaiting_permission') {
+              this.setTurnLifecycleState('waiting_first_token');
+            }
           }
 
           // Emit request trace on each model generation start
@@ -496,6 +520,7 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
 
           // 仅发送信号到前端，不更新消息列表
           if (v.type === 'acp_permission') {
+            this.setTurnLifecycleState('awaiting_permission');
             const { toolCall, options } = v.data as AcpPermissionRequest;
 
             // Auto-approve ALL tools when in yolo/bypassPermissions mode.
@@ -546,7 +571,7 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
           // Clear busy guard and finalize thinking message when turn ends
           if (v.type === 'finish') {
             cronBusyGuard.setProcessing(this.conversation_id, false);
-            this.status = 'finished';
+            this.setTurnLifecycleState('idle');
             // Finalize thinking message with done status
             if (this.thinkingMsgId) {
               this.emitThinkingMessage('', 'done');
@@ -685,8 +710,7 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
     const managerSendStart = Date.now();
     // Mark conversation as busy to prevent cron jobs from running
     cronBusyGuard.setProcessing(this.conversation_id, true);
-    // Set status to running when message is being processed
-    this.status = 'running';
+    this.setTurnLifecycleState('starting');
     try {
       // Emit/persist user message immediately so UI can refresh without waiting
       // for ACP connection/auth/session initialization.
@@ -1172,7 +1196,7 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
    */
   private clearBusyState(): void {
     cronBusyGuard.setProcessing(this.conversation_id, false);
-    this.status = 'finished';
+    this.setTurnLifecycleState('idle');
   }
 
   private async saveContextUsage(usage: { used: number; size: number }): Promise<void> {
