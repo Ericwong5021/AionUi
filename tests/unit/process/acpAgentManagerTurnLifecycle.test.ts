@@ -199,6 +199,72 @@ describe('AcpAgentManager turn lifecycle', () => {
     expect(mockResponseEmit).toHaveBeenCalledTimes(beforeCalls);
   });
 
+  it('does not reconcile a transient disconnect before the disconnect grace window elapses', async () => {
+    const manager = new AcpAgentManager({
+      conversation_id: 'conv-test',
+      backend: 'claude' as AcpBackend,
+      workspace: '/tmp/workspace',
+    });
+
+    await manager.sendMessage({
+      content: 'hello',
+      msg_id: 'msg-1',
+    });
+
+    const beforeCalls = mockResponseEmit.mock.calls.length;
+    const internals = manager as unknown as {
+      agent: { isConnected: boolean; hasActiveSession: boolean };
+      activeTurnStartedAt: number | null;
+      activeTurnTimeoutMs: number;
+      reconcileActiveTurnIfStale: (now?: number) => void;
+    };
+    const now = Date.now();
+    internals.agent.isConnected = false;
+    internals.agent.hasActiveSession = false;
+    internals.activeTurnStartedAt = now - 4_000;
+    internals.activeTurnTimeoutMs = 300_000;
+
+    internals.reconcileActiveTurnIfStale(now);
+
+    expect(manager.status).toBe('running');
+    expect(mockResponseEmit).toHaveBeenCalledTimes(beforeCalls);
+  });
+
+  it('reconciles a disconnected turn after the disconnect grace window elapses', async () => {
+    const manager = new AcpAgentManager({
+      conversation_id: 'conv-test',
+      backend: 'claude' as AcpBackend,
+      workspace: '/tmp/workspace',
+    });
+
+    await manager.sendMessage({
+      content: 'hello',
+      msg_id: 'msg-1',
+    });
+
+    const internals = manager as unknown as {
+      agent: { isConnected: boolean; hasActiveSession: boolean };
+      activeTurnStartedAt: number | null;
+      activeTurnTimeoutMs: number;
+      reconcileActiveTurnIfStale: (now?: number) => void;
+    };
+    const now = Date.now();
+    internals.agent.isConnected = false;
+    internals.agent.hasActiveSession = false;
+    internals.activeTurnStartedAt = now - 6_000;
+    internals.activeTurnTimeoutMs = 300_000;
+
+    internals.reconcileActiveTurnIfStale(now);
+
+    expect(manager.status).toBe('finished');
+    expect(mockResponseEmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'finish',
+        conversation_id: 'conv-test',
+      })
+    );
+  });
+
   it('keeps runtime busy until a finish signal arrives', async () => {
     const manager = new AcpAgentManager({
       conversation_id: 'conv-test',
