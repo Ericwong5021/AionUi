@@ -38,6 +38,7 @@ import { useTeamPermission } from '@/renderer/pages/team/hooks/TeamPermissionCon
 import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
 import { useAcpMessage } from './useAcpMessage';
 import { useAcpInitialMessage } from './useAcpInitialMessage';
+import { useAcpSessionCommandQueue } from './useAcpSessionCommandQueue';
 
 const useAcpSendBoxDraft = getSendBoxDraftHook('acp', {
   _type: 'acp',
@@ -240,6 +241,19 @@ Please check your local CLI tool authentication status`,
     [agentSlotId, backend, checkAndUpdateTitle, conversation_id, setAiProcessing, t, teamId, workspacePath]
   );
 
+  const teamCommandQueue = useConversationCommandQueue({
+    conversationId: conversation_id,
+    enabled: isCommandQueueEnabled && Boolean(teamId),
+    isBusy,
+    isHydrated: hasHydratedRunningState,
+    onExecute: executeCommand,
+  });
+
+  const soloCommandQueue = useAcpSessionCommandQueue({
+    conversationId: conversation_id,
+    enabled: isCommandQueueEnabled && !teamId,
+  });
+
   const {
     items: queuedCommands,
     isPaused: isQueuePaused,
@@ -254,13 +268,7 @@ Please check your local CLI tool authentication status`,
     lockInteraction,
     unlockInteraction,
     resetActiveExecution,
-  } = useConversationCommandQueue({
-    conversationId: conversation_id,
-    enabled: isCommandQueueEnabled,
-    isBusy,
-    isHydrated: hasHydratedRunningState,
-    onExecute: executeCommand,
-  });
+  } = teamId ? teamCommandQueue : soloCommandQueue;
 
   const onSendHandler = async (message: string) => {
     if (!teamId && !isCommandQueueEnabled && isBusy) {

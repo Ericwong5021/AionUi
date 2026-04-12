@@ -14,9 +14,10 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 // ── Hoisted mocks ────────────────────────────────────────────────────────────
-const { mockSetProcessing, mockIsProcessing } = vi.hoisted(() => ({
+const { mockSetProcessing, mockIsProcessing, mockQueueChangedEmit } = vi.hoisted(() => ({
   mockSetProcessing: vi.fn(),
   mockIsProcessing: vi.fn(() => false),
+  mockQueueChangedEmit: vi.fn(),
 }));
 
 vi.mock('@process/services/cron/CronBusyGuard', () => ({
@@ -31,7 +32,7 @@ vi.mock('@process/utils/initStorage', () => ({
   ProcessConfig: { getConfig: vi.fn(() => ({})), get: vi.fn() },
 }));
 vi.mock('@/common', () => ({
-  ipcBridge: { acpConversation: { responseStream: { emit: vi.fn() } } },
+  ipcBridge: { acpConversation: { responseStream: { emit: vi.fn() }, queueChanged: { emit: mockQueueChangedEmit } } },
 }));
 vi.mock('@process/services/database', () => ({
   getDatabase: vi.fn(() => Promise.resolve({ updateConversation: vi.fn() })),
@@ -241,5 +242,57 @@ describe('AcpAgentManager.sendMessage — real class cronBusyGuard cleanup', () 
 
     expect(mockSetProcessing).toHaveBeenCalledWith('conv-9', true);
     expect(mockSetProcessing).toHaveBeenCalledWith('conv-9', false);
+  });
+});
+
+describe('AcpAgentManager session command queue', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('stores queued commands in process state and emits queue updates', () => {
+    const { manager } = makeManager('conv-queue-1');
+    manager.status = 'running' as typeof manager.status;
+
+    const result = manager.enqueueCommand('queued command', ['a.ts']);
+
+    expect(result.item?.input).toBe('queued command');
+    expect(manager.getQueueState().items).toEqual([
+      expect.objectContaining({
+        input: 'queued command',
+        files: ['a.ts'],
+      }),
+    ]);
+    expect(mockQueueChangedEmit).toHaveBeenCalled();
+  });
+
+  it('drains the next queued command after finish when the session becomes idle', async () => {
+    const { manager, mockAgent } = makeManager('conv-queue-2');
+    mockAgent.sendMessage.mockResolvedValue({ success: true });
+
+    manager.status = 'running' as typeof manager.status;
+    manager.enqueueCommand('queued after finish', []);
+    expect(mockAgent.sendMessage).not.toHaveBeenCalled();
+
+    await (manager as unknown as {
+      handleFinishSignal: (message: unknown, backend: AcpBackend) => Promise<void>;
+    }).handleFinishSignal(
+      {
+        type: 'finish',
+        conversation_id: 'conv-queue-2',
+        msg_id: 'finish-1',
+        data: null,
+      },
+      'claude' as AcpBackend
+    );
+
+    await Promise.resolve();
+
+    expect(mockAgent.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'queued after finish',
+        files: [],
+      })
+    );
   });
 });

@@ -10,6 +10,11 @@ import type { OpenDialogOptions } from 'electron';
 import type { McpSource } from '../../process/services/mcpServices/McpProtocol';
 import type { AcpBackend, AcpBackendAll, AcpModelInfo, PresetAgentType } from '../types/acpTypes';
 import type { SlashCommandItem } from '../chat/slash/types';
+import type {
+  AcpSessionCommandQueueState,
+  ConversationCommandQueueItem,
+  QueueValidationFailureReason,
+} from '../chat/commandQueue';
 import type { IMcpServer, IProvider, TChatConversation, TProviderWithModel, ICssTheme } from '../config/storage';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/preview';
 import type {
@@ -433,6 +438,34 @@ export const mode = {
 export const acpConversation = {
   sendMessage: conversation.sendMessage,
   responseStream: conversation.responseStream,
+  getQueueState: bridge.buildProvider<
+    IBridgeResponse<{ state: AcpSessionCommandQueueState }>,
+    { conversationId: string }
+  >('acp.queue.get-state'),
+  enqueueCommand: bridge.buildProvider<
+    IBridgeResponse<{ item?: ConversationCommandQueueItem; reason?: QueueValidationFailureReason }>,
+    { conversationId: string; input: string; files: string[] }
+  >('acp.queue.enqueue'),
+  updateQueuedCommand: bridge.buildProvider<
+    IBridgeResponse<{ updated: boolean; reason?: QueueValidationFailureReason }>,
+    { conversationId: string; commandId: string; input: string }
+  >('acp.queue.update'),
+  removeQueuedCommand: bridge.buildProvider<IBridgeResponse, { conversationId: string; commandId: string }>(
+    'acp.queue.remove'
+  ),
+  clearQueue: bridge.buildProvider<IBridgeResponse, { conversationId: string }>('acp.queue.clear'),
+  reorderQueue: bridge.buildProvider<
+    IBridgeResponse,
+    { conversationId: string; activeCommandId: string; overCommandId: string }
+  >('acp.queue.reorder'),
+  pauseQueue: bridge.buildProvider<IBridgeResponse, { conversationId: string }>('acp.queue.pause'),
+  resumeQueue: bridge.buildProvider<IBridgeResponse, { conversationId: string }>('acp.queue.resume'),
+  setQueueInteractionLock: bridge.buildProvider<IBridgeResponse, { conversationId: string; locked: boolean }>(
+    'acp.queue.set-interaction-lock'
+  ),
+  queueChanged: bridge.buildEmitter<{ conversationId: string; state: AcpSessionCommandQueueState }>(
+    'acp.queue.changed'
+  ),
   detectCliPath: bridge.buildProvider<IBridgeResponse<{ path?: string }>, { backend: AcpBackend }>(
     'acp.detect-cli-path'
   ),

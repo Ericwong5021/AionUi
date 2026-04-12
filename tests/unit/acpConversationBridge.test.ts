@@ -16,6 +16,16 @@ function makeChannel(name: string) {
 vi.mock('../../src/common', () => ({
   ipcBridge: {
     acpConversation: {
+      getQueueState: makeChannel('getQueueState'),
+      enqueueCommand: makeChannel('enqueueCommand'),
+      updateQueuedCommand: makeChannel('updateQueuedCommand'),
+      removeQueuedCommand: makeChannel('removeQueuedCommand'),
+      clearQueue: makeChannel('clearQueue'),
+      reorderQueue: makeChannel('reorderQueue'),
+      pauseQueue: makeChannel('pauseQueue'),
+      resumeQueue: makeChannel('resumeQueue'),
+      setQueueInteractionLock: makeChannel('setQueueInteractionLock'),
+      queueChanged: makeChannel('queueChanged'),
       checkEnv: makeChannel('checkEnv'),
       detectCliPath: makeChannel('detectCliPath'),
       getAvailableAgents: makeChannel('getAvailableAgents'),
@@ -112,6 +122,24 @@ describe('acpConversationBridge', () => {
     await handlers['getMode']({ conversationId: 'c1' });
 
     expect(taskManager.getTask).toHaveBeenCalledWith('c1');
+  });
+
+  it('returns an empty ACP session queue state when no task exists', async () => {
+    vi.mocked(taskManager.getTask).mockReturnValue(undefined);
+
+    const result = await handlers['getQueueState']({ conversationId: 'missing' });
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        state: {
+          items: [],
+          isPaused: false,
+          isInteractionLocked: false,
+          failure: null,
+        },
+      },
+    });
   });
 
   // --- refreshCustomAgents ---

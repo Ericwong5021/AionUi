@@ -2,6 +2,20 @@ import { AcpAgent } from '@process/agent/acp';
 import { channelEventBus } from '@process/channels/agent/ChannelEventBus';
 import { teamEventBus } from '@process/team/teamEventBus';
 import { ipcBridge } from '@/common';
+import {
+  createDefaultAcpSessionCommandQueueState,
+  createQueuedCommandItem,
+  getQueueValidationFailureReason,
+  normalizeQueueState,
+  removeQueuedCommand,
+  reorderQueuedCommand,
+  restoreQueuedCommand,
+  updateQueuedCommand,
+  validateQueuedCommandItem,
+  type AcpSessionCommandQueueState,
+  type ConversationCommandQueueItem,
+  type QueueValidationFailureReason,
+} from '@/common/chat/commandQueue';
 import type { CronMessageMeta, TMessage } from '@/common/chat/chatLib';
 import { isCodexAutoApproveMode } from '@/common/types/codex/codexModes';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
@@ -113,6 +127,8 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
   private missingFinishFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private missingFinishFallbackTurnId: number | null = null;
   private readonly missingFinishFallbackDelayMs = 15000;
+  private queueState: AcpSessionCommandQueueState = createDefaultAcpSessionCommandQueueState();
+  private queueDrainInFlight: boolean = false;
 
   constructor(data: AcpAgentManagerData) {
     super('acp', data, new IpcAgentEventEmitter());
@@ -124,6 +140,189 @@ class AcpAgentManager extends BaseAgentManager<AcpAgentManagerData, AcpPermissio
     this.status = 'pending';
     // Sync yoloMode from sessionMode so addConfirmation auto-approves when Full Auto is selected
     this.yoloMode = this.yoloMode || this.isYoloMode(this.currentMode);
+  }
+
+  getQueueState(): AcpSessionCommandQueueState {
+    return {
+      ...this.queueState,
+      items: this.queueState.items.map((item) => ({ ...item, files: [...item.files] })),
+      failure: this.queueState.failure ? { ...this.queueState.failure } : null,
+    };
+  }
+
+  enqueueCommand(
+    input: string,
+    files: string[]
+  ): { item?: ConversationCommandQueueItem; reason?: QueueValidationFailureReason } {
+    const currentState = normalizeQueueState(this.queueState);
+    const item = createQueuedCommandItem({ input, files });
+    const validation = validateQueuedCommandItem(item, currentState);
+    const failureReason = 'reason' in validation ? validation.reason : undefined;
+
+    if (failureReason) {
+      return { reason: failureReason };
+    }
+
+    this.queueState = {
+      ...this.queueState,
+      items: [...currentState.items, item],
+      failure: null,
+    };
+    this.emitQueueStateChanged();
+    this.scheduleQueueDrain();
+    return { item };
+  }
+
+  updateQueuedCommand(commandId: string, input: string): { updated: boolean; reason?: QueueValidationFailureReason } {
+    const currentState = normalizeQueueState(this.queueState);
+    const currentItem = currentState.items.find((item) => item.id === commandId);
+    if (!currentItem) {
+      return { updated: false };
+    }
+
+    const nextItems = updateQueuedCommand(currentState.items, commandId, { input });
+    const nextState = {
+      items: nextItems,
+      isPaused: false,
+    };
+    const reason = getQueueValidationFailureReason(nextState);
+    if (reason) {
+      return { updated: false, reason };
+    }
+
+    this.queueState = {
+      ...this.queueState,
+      items: nextItems,
+      isPaused: false,
+      failure: null,
+    };
+    this.emitQueueStateChanged();
+    this.scheduleQueueDrain();
+    return { updated: true };
+  }
+
+  removeQueuedCommand(commandId: string): void {
+    this.queueState = {
+      ...this.queueState,
+      items: removeQueuedCommand(this.queueState.items, commandId),
+      isPaused: false,
+      failure: this.queueState.failure?.commandId === commandId ? null : this.queueState.failure,
+    };
+    this.emitQueueStateChanged();
+    this.scheduleQueueDrain();
+  }
+
+  clearQueue(): void {
+    this.queueState = {
+      ...createDefaultAcpSessionCommandQueueState(),
+      isInteractionLocked: this.queueState.isInteractionLocked,
+    };
+    this.emitQueueStateChanged();
+  }
+
+  reorderQueue(activeCommandId: string, overCommandId: string): void {
+    this.queueState = {
+      ...this.queueState,
+      items: reorderQueuedCommand(this.queueState.items, activeCommandId, overCommandId),
+      isPaused: false,
+      failure: null,
+    };
+    this.emitQueueStateChanged();
+    this.scheduleQueueDrain();
+  }
+
+  pauseQueue(): void {
+    this.queueState = {
+      ...this.queueState,
+      isPaused: this.queueState.items.length > 0,
+    };
+    this.emitQueueStateChanged();
+  }
+
+  resumeQueue(): void {
+    this.queueState = {
+      ...this.queueState,
+      isPaused: false,
+      failure: null,
+    };
+    this.emitQueueStateChanged();
+    this.scheduleQueueDrain();
+  }
+
+  setQueueInteractionLocked(locked: boolean): void {
+    this.queueState = {
+      ...this.queueState,
+      isInteractionLocked: locked,
+    };
+    this.emitQueueStateChanged();
+    if (!locked) {
+      this.scheduleQueueDrain();
+    }
+  }
+
+  private emitQueueStateChanged(): void {
+    ipcBridge.acpConversation.queueChanged.emit({
+      conversationId: this.conversation_id,
+      state: this.getQueueState(),
+    });
+  }
+
+  private scheduleQueueDrain(): void {
+    void this.drainQueue();
+  }
+
+  private async drainQueue(): Promise<void> {
+    if (this.queueDrainInFlight) {
+      return;
+    }
+
+    if (
+      this.status === 'running' ||
+      this.queueState.isPaused ||
+      this.queueState.isInteractionLocked ||
+      this.queueState.items.length === 0
+    ) {
+      return;
+    }
+
+    const [nextCommand, ...remainingCommands] = this.queueState.items;
+    if (!nextCommand) {
+      return;
+    }
+
+    this.queueDrainInFlight = true;
+    this.queueState = {
+      ...this.queueState,
+      items: remainingCommands,
+      failure: null,
+    };
+    this.emitQueueStateChanged();
+
+    try {
+      const result = await this.sendMessage({
+        content: nextCommand.input,
+        files: nextCommand.files,
+        msg_id: uuid(),
+      });
+
+      if (!result.success) {
+        throw new Error(result.msg || result.message || 'Queued command failed to start');
+      }
+    } catch (error) {
+      this.queueState = {
+        ...this.queueState,
+        items: restoreQueuedCommand(this.queueState.items, nextCommand),
+        isPaused: true,
+        failure: {
+          id: uuid(),
+          commandId: nextCommand.id,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      this.emitQueueStateChanged();
+    } finally {
+      this.queueDrainInFlight = false;
+    }
   }
 
   private makeStreamBufferKey(message: Extract<TMessage, { type: 'text' }>): string {
@@ -358,6 +557,8 @@ ${collectedResponses.join('\n')}`;
       pendingConfirmations: this.getConfirmations().length,
       modelId: this.persistedModelId ?? this.agent?.getModelInfo?.()?.currentModelId ?? undefined,
     });
+
+    this.scheduleQueueDrain();
   }
 
   private async sendAgentMessageWithFinishFallback(
@@ -911,7 +1112,7 @@ ${collectedResponses.join('\n')}`;
         },
         onSessionIdUpdate: (sessionId: string) => {
           // Save ACP session ID to database for resume support
-          // 保存 ACP session ID 到数据库以支持会话恢复
+          // 保存 ACP session ID ���数据库以支持会话恢复
           this.saveAcpSessionId(sessionId);
         },
         onAvailableCommandsUpdate: (commands: Array<{ name: string; description?: string; hint?: string }>) => {

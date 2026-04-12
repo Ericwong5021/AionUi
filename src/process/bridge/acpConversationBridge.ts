@@ -18,6 +18,16 @@ import { ipcBridge } from '@/common';
 import * as os from 'os';
 
 export function initAcpConversationBridge(workerTaskManager: IWorkerTaskManager): void {
+  const getExistingAcpTask = (conversationId: string): AcpAgentManager | null => {
+    const task = workerTaskManager.getTask(conversationId);
+    return task instanceof AcpAgentManager ? task : null;
+  };
+
+  const getOrBuildAcpTask = async (conversationId: string): Promise<AcpAgentManager | null> => {
+    const task = await workerTaskManager.getOrBuildTask(conversationId);
+    return task instanceof AcpAgentManager ? task : null;
+  };
+
   // Debug provider to check environment variables
   ipcBridge.acpConversation.checkEnv.provider(() => {
     return Promise.resolve({
@@ -72,6 +82,109 @@ export function initAcpConversationBridge(workerTaskManager: IWorkerTaskManager)
         msg: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  });
+
+  ipcBridge.acpConversation.getQueueState.provider(async ({ conversationId }) => {
+    const task = getExistingAcpTask(conversationId);
+    return {
+      success: true,
+      data: {
+        state: task?.getQueueState() ?? {
+          items: [],
+          isPaused: false,
+          isInteractionLocked: false,
+          failure: null,
+        },
+      },
+    };
+  });
+
+  ipcBridge.acpConversation.enqueueCommand.provider(async ({ conversationId, input, files }) => {
+    const task = await getOrBuildAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    const result = task.enqueueCommand(input, files);
+    if (result.reason) {
+      return { success: false, msg: result.reason, data: { reason: result.reason } };
+    }
+
+    return { success: true, data: { item: result.item } };
+  });
+
+  ipcBridge.acpConversation.updateQueuedCommand.provider(async ({ conversationId, commandId, input }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    const result = task.updateQueuedCommand(commandId, input);
+    if (result.reason) {
+      return { success: false, msg: result.reason, data: { updated: false, reason: result.reason } };
+    }
+
+    return { success: true, data: { updated: result.updated } };
+  });
+
+  ipcBridge.acpConversation.removeQueuedCommand.provider(async ({ conversationId, commandId }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.removeQueuedCommand(commandId);
+    return { success: true };
+  });
+
+  ipcBridge.acpConversation.clearQueue.provider(async ({ conversationId }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.clearQueue();
+    return { success: true };
+  });
+
+  ipcBridge.acpConversation.reorderQueue.provider(async ({ conversationId, activeCommandId, overCommandId }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.reorderQueue(activeCommandId, overCommandId);
+    return { success: true };
+  });
+
+  ipcBridge.acpConversation.pauseQueue.provider(async ({ conversationId }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.pauseQueue();
+    return { success: true };
+  });
+
+  ipcBridge.acpConversation.resumeQueue.provider(async ({ conversationId }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.resumeQueue();
+    return { success: true };
+  });
+
+  ipcBridge.acpConversation.setQueueInteractionLock.provider(async ({ conversationId, locked }) => {
+    const task = getExistingAcpTask(conversationId);
+    if (!task) {
+      return { success: false, msg: 'Conversation not found or not an ACP agent' };
+    }
+
+    task.setQueueInteractionLocked(locked);
+    return { success: true };
   });
 
   // Refresh custom agents detection - called when custom agents config changes

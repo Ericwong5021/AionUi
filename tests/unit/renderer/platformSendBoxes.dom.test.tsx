@@ -35,6 +35,13 @@ const mockUseConversationCommandQueue = vi.fn(() => ({
   hasPendingCommands: false,
   ...queueSpies,
 }));
+const mockUseAcpSessionCommandQueue = vi.fn(() => ({
+  items: [] as QueueItem[],
+  isPaused: false,
+  isInteractionLocked: false,
+  hasPendingCommands: false,
+  ...queueSpies,
+}));
 
 const mockConversationGetInvoke = vi.fn();
 const mockConversationStopInvoke = vi.fn();
@@ -81,6 +88,21 @@ vi.mock('@/common', () => ({
     },
     acpConversation: {
       sendMessage: { invoke: (...args: unknown[]) => mockAcpSendInvoke(...args) },
+      getQueueState: {
+        invoke: vi.fn(async () => ({
+          success: true,
+          data: { state: { items: [], isPaused: false, isInteractionLocked: false, failure: null } },
+        })),
+      },
+      enqueueCommand: { invoke: vi.fn() },
+      updateQueuedCommand: { invoke: vi.fn() },
+      removeQueuedCommand: { invoke: vi.fn() },
+      clearQueue: { invoke: vi.fn() },
+      reorderQueue: { invoke: vi.fn() },
+      pauseQueue: { invoke: vi.fn() },
+      resumeQueue: { invoke: vi.fn() },
+      setQueueInteractionLock: { invoke: vi.fn() },
+      queueChanged: { on: vi.fn(() => vi.fn()) },
     },
     geminiConversation: {
       sendMessage: { invoke: (...args: unknown[]) => mockGeminiSendInvoke(...args) },
@@ -261,6 +283,10 @@ vi.mock('@/renderer/pages/conversation/Messages/hooks', () => ({
 vi.mock('@/renderer/pages/conversation/platforms/useConversationCommandQueue', () => ({
   shouldEnqueueConversationCommand: (...args: unknown[]) => mockShouldEnqueueConversationCommand(...args),
   useConversationCommandQueue: (...args: unknown[]) => mockUseConversationCommandQueue(...args),
+}));
+
+vi.mock('@/renderer/pages/conversation/platforms/acp/useAcpSessionCommandQueue', () => ({
+  useAcpSessionCommandQueue: (...args: unknown[]) => mockUseAcpSessionCommandQueue(...args),
 }));
 
 vi.mock('@/renderer/pages/conversation/platforms/assertBridgeSuccess', () => ({
